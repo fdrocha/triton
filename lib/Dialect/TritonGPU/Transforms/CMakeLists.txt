@@ -1,21 +1,41 @@
-add_mlir_dialect_library(TritonGPUTransforms
+add_triton_library(TritonGPUTransforms
   AccelerateMatmul.cpp
   Coalesce.cpp
-  DecomposeConversions.cpp
-  FuseTranspositions.cpp
-  Pipeline.cpp
+  F32DotTC.cpp
+  FuseNestedLoops.cpp
+  CombineTensorSelectAndIf.cpp
+  DecomposeScaledBlocked.cpp
+  LoopScheduling.cpp
+  ReduceDataDuplication.cpp
+  OptimizeAccumulatorInit.cpp
+  OptimizeDotOperands.cpp
+  OptimizeThreadLocality.cpp
+  Pipeliner/AssignLatencies.cpp
+  Pipeliner/MatmulLoopPipeline.cpp
+  Pipeliner/PipelineExpander.cpp
+  Pipeliner/TestPipelineAssignLatencies.cpp
+  Pipeliner/TestPipelineScheduleLoop.cpp
+  Pipeliner/SoftwarePipeliner.cpp
+  Pipeliner/TC05MMAPipeline.cpp
+  Pipeliner/TMAStoresPipeline.cpp
+  Pipeliner/ModifiedAccMMAPipeline.cpp
+  Pipeliner/PipeliningUtility.cpp
+  Pipeliner/Schedule.cpp
   Prefetch.cpp
   RemoveLayoutConversions.cpp
   ReorderInstructions.cpp
-  TritonGPUConversion.cpp
-  UpdateMmaForVolta.cpp
+  CoalesceAsyncCopy.cpp
   Utility.cpp
 
   DEPENDS
   TritonGPUTransformsIncGen
 
   LINK_LIBS PUBLIC
+  MLIRTransforms
+  MLIRTransformUtils
+  TritonAnalysis
   TritonIR
   TritonGPUIR
+  TritonNvidiaGPUIR
   MLIRTransformUtils
 )

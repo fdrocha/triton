@@ -4,7 +4,7 @@
 include "mlir/IR/OpBase.td"
 
 def TritonGPU_Dialect : Dialect {
-  let name = "triton_gpu";
+  let name = "ttg";
 
   let cppNamespace = "::mlir::triton::gpu";
 
@@ -17,20 +17,23 @@ def TritonGPU_Dialect : Dialect {
   let dependentDialects = [
     "triton::TritonDialect",
     "mlir::gpu::GPUDialect",
-    "tensor::TensorDialect",
   ];
 
   let extraClassDeclaration = [{
-    static std::string getNumWarpsAttrName() { return "triton_gpu.num-warps"; }
-    static int getNumWarps(ModuleOp mod) { 
-      if(!mod->hasAttr("triton_gpu.num-warps"))
-        llvm::report_fatal_error(
-            "TritonGPU module should contain a triton_gpu.num-warps attribute");
-      return mod->getAttr("triton_gpu.num-warps").cast<IntegerAttr>().getInt();
-    }
+    void registerTypes();
+
+    LinearLayout toLinearLayout(ArrayRef<int64_t> shape, Attribute layout);
+
+    static int getNumCTAs(ModuleOp mod);
+    static int getThreadsPerWarp(ModuleOp mod);
+
+    private:
+      LinearLayoutCache llCache;
   }];
-  
+
+  let useDefaultTypePrinterParser = 1;
   let useDefaultAttributePrinterParser = 1;
+  let usePropertiesForAttributes = 1;
 }
 
 #endif

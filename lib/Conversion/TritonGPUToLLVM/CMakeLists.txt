@@ -1,33 +1,40 @@
-add_mlir_conversion_library(TritonGPUToLLVM
+add_triton_library(TritonGPUToLLVM
+    ConvertLayoutOpToLLVM/SharedToDotOperandFMA.cpp
+    DotOpToLLVM/FMA.cpp
+    DotOpToLLVM/FMADotUtility.cpp
+    AllocateSharedMemory.cpp
+    AssertOpToLLVM.cpp
+    ControlFlowOpToLLVM.cpp
     ConvertLayoutOpToLLVM.cpp
-    DotOpToLLVM.cpp
+    DecomposeUnsupportedConversions.cpp
     ElementwiseOpToLLVM.cpp
-    LoadStoreOpToLLVM.cpp
-    TritonGPUToLLVM.cpp
-    TritonGPUToLLVMPass.cpp
-    PTXAsmFormat.cpp
+    FuncOpToLLVM.cpp
+    GatherOpToLLVM.cpp
+    GlobalScratchMemoryAllocation.cpp
+    HistogramOpToLLVM.cpp
+    MakeRangeOpToLLVM.cpp
+    MemoryOpToLLVM.cpp
+    PrintOpToLLVM.cpp
     ReduceOpToLLVM.cpp
+    ScanOpToLLVM.cpp
+    SPMDOpToLLVM.cpp
+    TypeConverter.cpp
     Utility.cpp
     ViewOpToLLVM.cpp
-    DotOpHelpers.cpp
-
-    ADDITIONAL_HEADER_DIRS
-    ${PROJECT_SOURCE_DIR}/include/triton/Conversion/TritonGPUToLLVM
 
     DEPENDS
-    TritonConversionPassIncGen
-
-    LINK_COMPONENTS
-    Core
+    TritonGPUConversionPassIncGen
 
     LINK_LIBS PUBLIC
     MLIRIR
     MLIRPass
-    MLIRGPUOps
+    MLIRGPUDialect
     MLIRGPUToNVVMTransforms
+    MLIRGPUToROCDLTransforms
     MLIRGPUTransforms
     TritonAnalysis
     TritonIR
     TritonGPUIR
     TritonGPUTransforms
+    TritonNvidiaGPUTransforms
 )
