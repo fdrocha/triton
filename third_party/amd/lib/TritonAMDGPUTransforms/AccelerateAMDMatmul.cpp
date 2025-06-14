@@ -10,15 +10,15 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Tools/LayoutUtils.h"
 #include "llvm/ADT/TypeSwitch.h"
-#include <memory>
 
-using namespace mlir;
 namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
 using ::mlir::LLVM::AMD::isChainDotHead;
 using ::mlir::LLVM::AMD::isChainDotTail;
 using ::mlir::LLVM::AMD::scaleDotElemTypeToMLIRType;
 using mlir::triton::gpu::chooseScaledMfmaScaleLayout;
+
+namespace mlir {
 
 namespace {
 using triton::AMD::ISAFamily;
@@ -136,9 +136,9 @@ warpsPerTileWMMA(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps) {
 // If enforcedNonKDim is not zero, it will be used to overwrite the default
 // logic to choose a MFMA with matching M/N dim.
 FailureOr<MfmaIntrinsic>
-chooseMfmaInstruction(int mfmaVersion, RankedTensorType cType, Type aElemType,
-                      Type bElemType, int inputKSize, int enforcedNonKDim,
-                      bool withScale, bool allowXF32) {
+chooseMfmaInstruction(Location loc, int mfmaVersion, RankedTensorType cType,
+                      Type aElemType, Type bElemType, int inputKSize,
+                      int enforcedNonKDim, bool withScale, bool allowXF32) {
   // number of matrix elements along k dim per one MFMA instruction
   unsigned kDim = 0;
 
@@ -166,10 +166,11 @@ chooseMfmaInstruction(int mfmaVersion, RankedTensorType cType, Type aElemType,
     return failure();
 
   FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic =
-      MfmaIntrinsic::selectFor(mfmaVersion, mDim, nDim, inputKSize, aElemType,
-                               bElemType, withScale, allowXF32);
+      MfmaIntrinsic::selectFor(loc, mfmaVersion, mDim, nDim, inputKSize,
+                               aElemType, bElemType, withScale, allowXF32);
   if (failed(maybeMfmaIntrinsic))
-    llvm::report_fatal_error("No match found in MFMA database\n");
+    return emitError(loc, "no matching matrix core intrinsic due to "
+                          "unsupported element type");
 
   kDim = maybeMfmaIntrinsic->kDim;
   assert(kDim != 0);
@@ -188,7 +189,7 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotOp dot, int mfmaVersion,
   bool allowXF32 =
       dot.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
   return chooseMfmaInstruction(
-      mfmaVersion, dot.getC().getType(), aType.getElementType(),
+      dot.getLoc(), mfmaVersion, dot.getC().getType(), aType.getElementType(),
       dot.getB().getType().getElementType(), aType.getShape().back(), nonKDim,
       withScale, allowXF32);
 }
@@ -204,8 +205,8 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
   }
   Type aElemType = scaleDotElemTypeToMLIRType(ctx, dot.getAElemType());
   Type bElemType = scaleDotElemTypeToMLIRType(ctx, dot.getBElemType());
-  return chooseMfmaInstruction(mfmaVersion, dot.getC().getType(), aElemType,
-                               bElemType, inputKDim, nonKDim,
+  return chooseMfmaInstruction(dot.getLoc(), mfmaVersion, dot.getC().getType(),
+                               aElemType, bElemType, inputKDim, nonKDim,
                                /*withScale=*/true, /*allowXF32=*/false);
 }
 
@@ -215,9 +216,9 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
   // For scaled dot, we handle it with fp16 or bf16 emulation for now.
   Builder b(dot.getContext());
   Type elemType = useFp16 ? b.getF16Type() : b.getBF16Type();
-  return chooseMfmaInstruction(mfmaVersion, dot.getC().getType(), elemType,
-                               elemType, dot.getA().getType().getShape().back(),
-                               nonKDim,
+  return chooseMfmaInstruction(dot.getLoc(), mfmaVersion, dot.getC().getType(),
+                               elemType, elemType,
+                               dot.getA().getType().getShape().back(), nonKDim,
                                /*withScale=*/false, /*allowXF32=*/false);
 }
 
@@ -1222,20 +1223,16 @@ public:
 
 } // namespace
 
-#define GEN_PASS_CLASSES
+#define GEN_PASS_DEF_TRITONAMDGPUACCELERATEMATMUL
 #include "TritonAMDGPUTransforms/Passes.h.inc"
 
 class TritonAMDGPUAccelerateMatmulPass
-    : public TritonAMDGPUAccelerateMatmulBase<
+    : public impl::TritonAMDGPUAccelerateMatmulBase<
           TritonAMDGPUAccelerateMatmulPass> {
 public:
-  TritonAMDGPUAccelerateMatmulPass() = default;
-  TritonAMDGPUAccelerateMatmulPass(StringRef archGen, int matrixInstructionSize,
-                                   int kPack) {
-    this->archGenerationName = archGen.data();
-    this->matrixInstructionSize = matrixInstructionSize;
-    this->kPack = kPack;
-  }
+  using impl::TritonAMDGPUAccelerateMatmulBase<
+      TritonAMDGPUAccelerateMatmulPass>::TritonAMDGPUAccelerateMatmulBase;
+
   void runOnOperation() override {
 
     MLIRContext *context = &getContext();
@@ -1270,8 +1267,4 @@ public:
   }
 };
 
-std::unique_ptr<Pass> mlir::createTritonAMDGPUAccelerateMatmulPass(
-    std::string archGen, int matrixInstructionSize, int kPack) {
-  return std::make_unique<TritonAMDGPUAccelerateMatmulPass>(
-      archGen, matrixInstructionSize, kPack);
-}
+} // namespace mlir
