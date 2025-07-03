@@ -22,6 +22,7 @@
  */
 #include "../PatternTritonGPUOpToLLVM.h"
 #include "../TritonAMDGPUToLLVM/SchedInstructions.h"
+#include "AsyncUtility.h"
 #include "SharedToDotOperandHelper.h"
 #include "Utility.h"
 
@@ -219,6 +220,13 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
   int nonKDimIdx = opIdx == 0 ? rank - 2 : rank - 1;
 
   auto mfmaLayout = cast<AMDMfmaEncodingAttr>(encoding.getParent());
+
+  // tilesPerWarp parameter is only implemented trough LL path.
+  auto tilesPerWarp = mfmaLayout.getTilesPerWarp();
+  if (!mfmaLayout.hasUnitTilesPerWarp()) {
+    return Value();
+  }
+
   auto mDim = mfmaLayout.getMDim();
   auto nDim = mfmaLayout.getNDim();
   assert((mDim == nDim && (mDim == 32 || mDim == 16 || mDim == 4)) ||
@@ -397,7 +405,7 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
       setNumGeneratedDsReads(localLoadOp, numDsReadsCount, loadVecTy);
 
       for (auto llLoad : llLoads) {
-        LLVM::AMD::addLocalLoadNoAliasScope(localLoadOp, llLoad);
+        AMD::addLocalLoadNoAliasScope(localLoadOp, llLoad);
       }
     }
   }
