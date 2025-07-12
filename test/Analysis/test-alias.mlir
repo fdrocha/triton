@@ -5,7 +5,7 @@
 #A_SHARED = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
 #A_SHARED_T = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [0, 1]}>
 #B_SHARED = #ttg.swizzled_shared<{vec = 2, perPhase = 2, maxPhase = 4, order = [1, 0]}>
-#C = #ttg.nvidia_mma<{versionMajor = 2, warpsPerCTA = [4, 1]}>
+#C = #ttg.nvidia_mma<{versionMajor = 2, warpsPerCTA = [4, 1], instrShape = [16, 8]}>
 #A_DOT = #ttg.dot_op<{opIdx = 0, parent = #C, kWidth=2}>
 #B_DOT = #ttg.dot_op<{opIdx = 1, parent = #C, kWidth=2}>
 
@@ -188,6 +188,20 @@ tt.func @cf_for(%arg0: index, %arg1: index, %arg2: index, %arg3: !tt.ptr<f16>, %
   gpu.barrier
   // expected-remark @below {{%10 -> %0}}
   %9 = ttg.memdesc_subview %0[%idx, %idx] : !ttg.memdesc<128x32xf16, #A_SHARED, #ttg.shared_memory, mutable> -> !ttg.memdesc<128x32xf16, #A_SHARED, #ttg.shared_memory, mutable>
+  tt.return
+}
+
+tt.func @poison_memdesc(%arg0: i1) {
+  // expected-remark @below {{%0 -> %0}}
+  %0 = ttg.local_alloc : () -> !ttg.memdesc<128x32xf16, #A_SHARED, #ttg.shared_memory, mutable>
+  cf.cond_br %arg0, ^bb1, ^bb2(%0 : !ttg.memdesc<128x32xf16, #A_SHARED, #ttg.shared_memory, mutable>)
+^bb1:
+  %1 = ub.poison : !ttg.memdesc<128x32xf16, #A_SHARED, #ttg.shared_memory, mutable>
+  cf.br ^bb2(%1 : !ttg.memdesc<128x32xf16, #A_SHARED, #ttg.shared_memory, mutable>)
+^bb2(%2: !ttg.memdesc<128x32xf16, #A_SHARED, #ttg.shared_memory, mutable>):
+  %c0_i32 = arith.constant 0 : i32
+  // expected-remark @below {{%3 -> %0}}
+  %3 = ttg.memdesc_subview %2[%c0_i32, %c0_i32] : !ttg.memdesc<128x32xf16, #A_SHARED, #ttg.shared_memory, mutable> -> !ttg.memdesc<128x32xf16, #A_SHARED, #ttg.shared_memory, mutable>
   tt.return
 }
 

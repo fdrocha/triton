@@ -22,18 +22,17 @@
  */
 
 #include "TritonAMDGPUTransforms/Passes.h"
-#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "mlir/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
-#include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 
-using namespace mlir;
+namespace mlir {
+
+#define GEN_PASS_DEF_TRITONAMDGPUOPTIMIZEEPILOGUE
+#include "TritonAMDGPUTransforms/Passes.h.inc"
 
 namespace {
 
@@ -76,21 +75,18 @@ usePermlaneSwapToOptimizeStore(PatternRewriter &rewriter, Value ptr, Value val,
 
   Attribute newEncoding = triton::gpu::LinearEncodingAttr::get(
       oldStoreOp.getContext(), storeLL.value());
-  auto newPtrType = RankedTensorType::get(
-      ptrType.getShape(), ptrType.getElementType(), newEncoding);
+  auto newPtrType = ptrType.cloneWithEncoding(newEncoding);
   Value newPtr = rewriter.create<triton::gpu::ConvertLayoutOp>(ptr.getLoc(),
                                                                newPtrType, ptr);
 
-  auto newValType = RankedTensorType::get(
-      valType.getShape(), valType.getElementType(), newEncoding);
+  auto newValType = valType.cloneWithEncoding(newEncoding);
   Value newVal = rewriter.create<triton::gpu::ConvertLayoutOp>(val.getLoc(),
                                                                newValType, val);
 
   Value newMask = mask;
   if (mask) {
     auto maskType = dyn_cast<RankedTensorType>(mask.getType());
-    auto newMaskType = RankedTensorType::get(
-        maskType.getShape(), maskType.getElementType(), newEncoding);
+    auto newMaskType = maskType.cloneWithEncoding(newEncoding);
     newMask = rewriter.create<triton::gpu::ConvertLayoutOp>(mask.getLoc(),
                                                             newMaskType, mask);
   }
@@ -164,8 +160,7 @@ public:
     auto newEncoding =
         cast<RankedTensorType>(cvtOp.getSrc().getType()).getEncoding();
 
-    auto newPtrType = RankedTensorType::get(
-        ptrType.getShape(), ptrType.getElementType(), newEncoding);
+    auto newPtrType = ptrType.cloneWithEncoding(newEncoding);
     Value newPtr = rewriter.create<triton::gpu::ConvertLayoutOp>(
         ptr.getLoc(), newPtrType, ptr);
 
@@ -178,16 +173,14 @@ public:
       newVal = llvm::cast<mlir::TypedValue<RankedTensorType>>(
           chainedOp->getResult(0));
 
-      auto newType = mlir::RankedTensorType::get(
-          oldType.getShape(), oldType.getElementType(), newEncoding);
+      auto newType = oldType.cloneWithEncoding(newEncoding);
       newVal.setType(newType);
     }
 
     Value newMask = mask;
     if (mask) {
       auto maskType = dyn_cast<RankedTensorType>(mask.getType());
-      auto newMaskType = RankedTensorType::get(
-          maskType.getShape(), maskType.getElementType(), newEncoding);
+      auto newMaskType = maskType.cloneWithEncoding(newEncoding);
       newMask = rewriter.create<triton::gpu::ConvertLayoutOp>(
           mask.getLoc(), newMaskType, mask);
     }
@@ -204,13 +197,10 @@ public:
   }
 };
 
-} // namespace
-
-#define GEN_PASS_CLASSES
-#include "TritonAMDGPUTransforms/Passes.h.inc"
+} // anonymous namespace
 
 class TritonAMDGPUOptimizeEpiloguePass
-    : public TritonAMDGPUOptimizeEpilogueBase<
+    : public impl::TritonAMDGPUOptimizeEpilogueBase<
           TritonAMDGPUOptimizeEpiloguePass> {
 
 public:
@@ -228,6 +218,4 @@ public:
   }
 };
 
-std::unique_ptr<Pass> mlir::createTritonAMDGPUOptimizeEpiloguePass() {
-  return std::make_unique<TritonAMDGPUOptimizeEpiloguePass>();
-}
+} // namespace mlir

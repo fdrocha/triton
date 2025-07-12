@@ -21,7 +21,6 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 #include "../PatternTritonGPUOpToLLVM.h"
-#include "../TritonAMDGPUToLLVM/SchedInstructions.h"
 #include "TritonAMDGPUTransforms/MfmaGroup.h"
 #include "Utility.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
@@ -145,6 +144,8 @@ struct DotOpMFMAConversionHelper {
       Value zero;
       if (elemType.isInteger(32))
         zero = b.i32_val(0);
+      else if (elemType.isF64())
+        zero = b.f64_val(0.0);
       else
         zero = b.f32_val(0.0);
       auto cond = b.icmp_ult(laneId, b.i32_val(subBlockSize));
@@ -237,10 +238,6 @@ struct DotOpMFMAConversionHelper {
         ctx, SmallVector<Type>(fc.size(), dstElemTy));
     Value res = packLLElements(loc, typeConverter, fc, rewriter, structTy);
 
-    setNumGeneratedMMAs(op, mmaCount, maybeMfmaIntrinsic->mDim,
-                        maybeMfmaIntrinsic->nDim, maybeMfmaIntrinsic->kDim,
-                        elemtTy);
-
     rewriter.replaceOp(op, res);
   }
 
@@ -253,7 +250,7 @@ struct DotOpMFMAConversionHelper {
     auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
     auto mDim = mfmaLayout.getMDim();
     auto nDim = mfmaLayout.getNDim();
-    auto mfmaVersion = mfmaLayout.getVersionMajor();
+    auto mfmaVersion = mfmaLayout.getVersion();
     assert((mDim == nDim && (mDim == 32 || mDim == 16 || mDim == 4)) ||
            (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
 
@@ -272,10 +269,11 @@ struct DotOpMFMAConversionHelper {
         op.getInputPrecision() == InputPrecision::TF32 && mfmaVersion == 3;
     StringRef intrinsicName;
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
-        mfmaVersion, mDim, nDim, kDimOperandSize, elemTyA, elemTyB,
+        op.getLoc(), mfmaVersion, mDim, nDim, kDimOperandSize, elemTyA, elemTyB,
         /*withScale=*/false, allowXF32);
     if (failed(maybeMfmaIntrinsic))
-      llvm::report_fatal_error("No match found in MFMA database\n");
+      return op.emitError(
+          "no matching matrix core intrinsic due to unsupported element type");
 
     unsigned kBase = maybeMfmaIntrinsic->kBase;
 
@@ -465,9 +463,9 @@ struct DotOpMFMAConversionHelper {
           }
 
           // Step 2: process rawElems based on element type
-          // Note that for f32 input and XF32 is not allowed, nothing needs to
-          // be done and rawElems is inserted into the ValueTable directly
-          if (type.isF32() && !allowXF32) {
+          // Note that for f32/fp64 input and XF32 is not allowed, nothing needs
+          // to be done and rawElems is inserted into the ValueTable directly
+          if ((type.isF32() || type.isF64()) && !allowXF32) {
             dotOpVals[{b, nonK, kBaseVec}] =
                 tb.extract_element(type, rawElems, tb.i32_val(0));
           } else {
@@ -544,7 +542,7 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
     auto mDim = mfmaLayout.getMDim();
     auto nDim = mfmaLayout.getNDim();
-    auto mfmaVersion = mfmaLayout.getVersionMajor();
+    auto mfmaVersion = mfmaLayout.getVersion();
     assert((mDim == nDim && (mDim == 32 || mDim == 16 || mDim == 4)) ||
            (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
 
@@ -557,8 +555,10 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     }
 
     bool existBothScales = aScale && bScale;
-    bool isAScaleConstant = aScale && aScale.getDefiningOp<arith::ConstantOp>();
-    bool isBScaleConstant = bScale && bScale.getDefiningOp<arith::ConstantOp>();
+    bool isAScaleConstant = aScale && isa<arith::ConstantOp, triton::SplatOp>(
+                                          aScale.getDefiningOp());
+    bool isBScaleConstant = bScale && isa<arith::ConstantOp, triton::SplatOp>(
+                                          bScale.getDefiningOp());
     Value d = op.getD();
     auto aTensorTy = cast<RankedTensorType>(a.getType());
     auto bTensorTy = cast<RankedTensorType>(b.getType());
@@ -583,14 +583,15 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto ctx = op.getContext();
     constexpr bool allowXF32 = false;
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
-        mfmaVersion, mDim, nDim,
+        op.getLoc(), mfmaVersion, mDim, nDim,
         aElemType == ScaleDotElemType::E2M1 ? kDimOperandSize * 2
                                             : kDimOperandSize,
         scaleDotElemTypeToMLIRType(ctx, aElemType),
         scaleDotElemTypeToMLIRType(ctx, bElemType),
         /*withScale=*/true, allowXF32);
     if (failed(maybeMfmaIntrinsic))
-      llvm::report_fatal_error("No match found in MFMA database\n");
+      return op.emitError(
+          "no matching matrix core intrinsic due to unsupported element type");
 
     StringRef intrinsicName = maybeMfmaIntrinsic->name;
     unsigned kBase = maybeMfmaIntrinsic->kBase;

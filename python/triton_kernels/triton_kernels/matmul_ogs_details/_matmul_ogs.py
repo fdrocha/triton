@@ -1,14 +1,10 @@
 import triton
 import triton.language as tl
-from triton_kernels.numerics_details.mxfp import (
-    get_scaled_dot_format_string,
-    unswizzle_mx_scale_bw,
-    unswizzle_mxfp4_scale_hopper,
-    unswizzle_mxfp4_value_hopper,
-)
-
+from triton_kernels.tensor_details.layout_details.blackwell_scale import unswizzle_mx_scale_bw
+from triton_kernels.tensor_details.layout_details.hopper_scale import unswizzle_mxfp4_scale_hopper
+from triton_kernels.tensor_details.layout_details.hopper_value import unswizzle_mxfp4_value_hopper
 from triton_kernels.numerics_details.flexpoint import float_to_flex, load_scale
-from ._common import make_matmul_repr, matmul_launch_metadata, swizzle2d, xcd_swizzle
+from ._common import make_matmul_repr, matmul_launch_metadata, swizzle2d, xcd_swizzle, get_scaled_dot_format_string
 
 # fmt: off
 
@@ -29,17 +25,18 @@ def _zero_masked_rows(
 
 
 _matmul_ogs_repr = make_matmul_repr("_matmul_ogs", [0, 1, 2])
-@triton.jit(repr=_matmul_ogs_repr, launch_metadata=matmul_launch_metadata)
+@triton.jit(do_not_specialize=["TOKENS_PER_EXPT_FOR_ANNOTATION"],
+            repr=_matmul_ogs_repr, launch_metadata=matmul_launch_metadata)
 def _matmul_ogs(
              Y, Out, stride_y_k, stride_y_z, stride_y_m, stride_y_n,
              YExpectedScale, YActualScale, YChecksumScale,
-             X, stride_x_z, stride_x_m, stride_x_k,
+             X, XPtr, stride_x_z, stride_x_m, stride_x_k,
              XScale,
              W, stride_w_e, stride_w_k, stride_w_n, W_TRANSPOSE: tl.constexpr,
              WScale,
-             MxScale, stride_mx_e, stride_mx_k, stride_mx_n, MX_TRANSPOSE: tl.constexpr,
+             MxScale, stride_mx_e, stride_mx_k, stride_mx_n,
              B, stride_b_e, # Bias
-             NRows, M, N, K, # shapes
+             M, N, K, # shapes
              # expt data
              Betas, Gammas,
              GatherIndx,
@@ -50,6 +47,8 @@ def _matmul_ogs(
              batch_size, grid_m, grid_n,
              # Out scale
              out_alpha,
+             # fused activation function
+             ACTIVATION_FN: tl.constexpr, activation_fn_args, ACTIVATION_REDUCTION_N: tl.constexpr,
              # epilogue transform
              EPILOGUE_FN: tl.constexpr, epilogue_fn_args,
              # MoE config
@@ -84,10 +83,13 @@ def _matmul_ogs(
                          "mx_weight_ptr must be uint8")
         tl.static_assert(MxScale.dtype.element_ty == tl.uint8, "mx_scale_ptr must be uint8")
         tl.static_assert(BLOCK_K % MX_PACK_DIVISOR == 0, "BLOCK_K must be a multiple of MX_PACK_DIVISOR")
-        tl.static_assert(SWIZZLE_MX_VALUE == "HOPPER" or SWIZZLE_MX_VALUE is None, "Only Hopper swizzling is supported for values")
+        tl.static_assert(SWIZZLE_MX_VALUE == "HOPPER_VALUE" or SWIZZLE_MX_VALUE is None, "Only Hopper swizzling is supported for values")
     else:
         tl.static_assert(SWIZZLE_MX_VALUE is None)
         tl.static_assert(SWIZZLE_MX_SCALE is None)
+
+    OUT_BLOCK_N: tl.constexpr = BLOCK_N // ACTIVATION_REDUCTION_N
+    yN = N // ACTIVATION_REDUCTION_N
 
     pid = tl.program_id(0)
     if ExptOffsSum is not None and XCD_SWIZZLE > 1:
@@ -109,7 +111,7 @@ def _matmul_ogs(
 
             # set masked out rows to 0
             if HAS_FUSED_SCATTER and N_EXPTS_ACT == 1:
-                _zero_masked_rows(pid_m, pid_n, Y, stride_y_m, stride_y_n, N, ScatterSrcIndx, num_idxs, BLOCK_M, BLOCK_N)
+                _zero_masked_rows(pid_m, pid_n, Y, stride_y_m, stride_y_n, yN, ScatterSrcIndx, num_idxs, BLOCK_M, OUT_BLOCK_N)
         return
 
     # swizzle program ids
@@ -126,7 +128,7 @@ def _matmul_ogs(
         Y += pid_k.to( index_type) * stride_y_k
     # set masked out rows to 0
     if HAS_FUSED_SCATTER and N_EXPTS_ACT == 1:
-        _zero_masked_rows(pid_m, pid_n, Y, stride_y_m, stride_y_n, N, ScatterSrcIndx, num_idxs, BLOCK_M, BLOCK_N)
+        _zero_masked_rows(pid_m, pid_n, Y, stride_y_m, stride_y_n, yN, ScatterSrcIndx, num_idxs, BLOCK_M, OUT_BLOCK_N)
     # unpack expert data
     if ExptData is None:
         tl.static_assert(M is not None)
@@ -159,7 +161,7 @@ def _matmul_ogs(
 
     # TODO: refactor if/else when triton front end improves
     if is_microscaled_format:
-        if SWIZZLE_MX_VALUE == "HOPPER":
+        if SWIZZLE_MX_VALUE == "HOPPER_VALUE":
             x_type: tl.constexpr = X.dtype.element_ty
             tl.static_assert(x_type == tl.bfloat16 or x_type == tl.float16, "Only bfloat16 or float16 is supported for HOPPER swizzling")
             tl.static_assert(is_mxfp4, "Only mxfp4 is supported for HOPPER swizzling")
@@ -180,13 +182,13 @@ def _matmul_ogs(
 
         MxScale += expt_id * stride_mx_e
 
-        if SWIZZLE_MX_SCALE == "BLACKWELL":
+        if SWIZZLE_MX_SCALE == "BLACKWELL_SCALE":
             tl.static_assert(BLOCK_N % 128 == 0)
             tl.static_assert(MX_SCALE_BLOCK_K % 4 == 0)
             PACKED_MX_BLOCK: tl.constexpr = (MX_SCALE_BLOCK_K // 4) * 32 * 4 * 4
             SCALE_BLOCK_N: tl.constexpr = BLOCK_N // 128
             stride_scale_k: tl.constexpr = 1
-        elif SWIZZLE_MX_SCALE == "HOPPER":
+        elif SWIZZLE_MX_SCALE == "HOPPER_SCALE":
             n_warps: tl.constexpr = tl.extra.cuda.num_warps()
             tl.static_assert(BLOCK_N % (2 * n_warps * 2 * 8) == 0)
             tl.static_assert(MX_SCALE_BLOCK_K % 2 == 0)
@@ -228,9 +230,9 @@ def _matmul_ogs(
                 mask_k_scale = tl.full([PACKED_MX_BLOCK], True, dtype=tl.int1)
         else:
             mask_k = offs_k < k
-            mask_k_w = offs_w_k < (tl.cdiv(k, W_K_DIVISOR) * W_K_MULTIPLIER)
+            mask_k_w = offs_w_k < ((k // W_K_DIVISOR) * W_K_MULTIPLIER)
             if is_microscaled_format and SWIZZLE_MX_SCALE is None:
-                mask_k_scale = offs_k_scale < tl.cdiv(k, MX_PACK_DIVISOR)
+                mask_k_scale = offs_k_scale * MX_PACK_DIVISOR < k
 
         x = tl.load(XPtrs, mask=mask_k[None, :], other=0.0)
         w = tl.load(WPtrs, mask=mask_k_w[:, None], other=0.0, cache_modifier=W_CACHE_MODIFIER)
@@ -243,23 +245,23 @@ def _matmul_ogs(
                 # Scale of 1 in E8M0 format
                 x_scales = tl.full((BLOCK_M, BLOCK_K // MX_PACK_DIVISOR), 127, dtype=tl.uint8)
 
-            if SWIZZLE_MX_SCALE == "BLACKWELL":
+            if SWIZZLE_MX_SCALE == "BLACKWELL_SCALE":
                 w_scales = unswizzle_mx_scale_bw(tl.load(MxScalePtrs))
-            elif SWIZZLE_MX_SCALE == "HOPPER":
+            elif SWIZZLE_MX_SCALE == "HOPPER_SCALE":
                 # Handshake with the swizzling code
                 tl.static_assert(tl.extra.cuda.num_warps() == 8, "Only 8 warps are supported for Hopper swizzling. Got %d" % tl.extra.cuda.num_warps())
                 w_scales = unswizzle_mxfp4_scale_hopper(tl.load(MxScalePtrs), num_warps=8)
             else:
                 w_scales = tl.load(MxScalePtrs, mask=mask_k_scale[None, :], other=0.0)
 
-            if SWIZZLE_MX_VALUE == "HOPPER":
+            if SWIZZLE_MX_VALUE == "HOPPER_VALUE":
                 # Handshake with the swizzling code
                 w = unswizzle_mxfp4_value_hopper(w, op_idx=1, mma_version=3)
                 mma_version: tl.constexpr = 3 if w.shape[1] >= 64 else 2
                 tl.static_assert(mma_version == 3, "Only mma_version 3 is supported for Hopper swizzling")
 
             acc = tl.dot_scaled(x, x_scales, x_format, w, w_scales, mx_format, acc=acc, fast_math=True)
-            if SWIZZLE_MX_SCALE == "BLACKWELL":
+            if SWIZZLE_MX_SCALE == "BLACKWELL_SCALE":
                 MxScalePtrs += (MX_SCALE_BLOCK_K // 4 * SPLIT_K) * stride_mx_k
             else:
                 MxScalePtrs += (PACKED_MX_BLOCK * SPLIT_K) * stride_mx_k
@@ -296,9 +298,17 @@ def _matmul_ogs(
         w_scale = load_scale(WScale)
     acc *= x_scale * w_scale
     acc = acc + bias[None, :] * betas[:, None]
-    acc *= gammas[:, None]
     if out_alpha is not None:
         acc *= out_alpha
+    if ACTIVATION_FN is not None:
+        out = ACTIVATION_FN(acc, *activation_fn_args)
+        tl.static_assert(out.shape[1] == OUT_BLOCK_N, f"Activation fn out.shape[1] ({out.shape[1]}) doesn't match computed OUT_BLOCK_N ({OUT_BLOCK_N})")
+        offs_y_n = OUT_BLOCK_N * pid_n + tl.arange(0, OUT_BLOCK_N)
+        mask_n = offs_y_n < yN
+    else:
+        tl.static_assert(ACTIVATION_REDUCTION_N == 1, "Activation reduction must be 1 if no activation fn is provided")
+        out = acc
+    out *= gammas[:, None]
     # write-back
     Y += start_z.to(index_type) * stride_y_z
     if WriteBackIndx is not None:
@@ -312,10 +322,10 @@ def _matmul_ogs(
 
     YPtrs = Y + offs_y_m.to(index_type)[:, None] * stride_y_m + offs_y_n.to(index_type)[None, :] * stride_y_n
     mask = mask_m[:, None] & mask_n[None, :]
-    acc = float_to_flex(acc, YExpectedScale, YActualScale, YChecksumScale, mask, Y, FLEXPOINT_SATURATE_INF)
+    out = float_to_flex(out, YExpectedScale, YActualScale, YChecksumScale, mask, Y, FLEXPOINT_SATURATE_INF)
     if EPILOGUE_FN is not None:
-        acc = EPILOGUE_FN(acc, *epilogue_fn_args, target_dtype=YPtrs.dtype.element_ty)
-    tl.store(YPtrs, acc, mask=mask)
+        out = EPILOGUE_FN(out, *epilogue_fn_args, target_dtype=YPtrs.dtype.element_ty)
+    tl.store(YPtrs, out, mask=mask)
 
 
 # Imagine N_EXPTS_ACT = 4, n_final_rows = 5, and n_scratchpad_rows = 8.
@@ -372,9 +382,9 @@ def _compute_writeback_idx(
     src_offs = offs_m[:, None] * N_EXPTS_ACT + tl.arange(0, N_EXPTS_ACT)[None, :]
     src_idxs = tl.load(ScatterSrcIndx + src_offs, mask=mask_m[:, None], other=-1)
     is_src_active = (src_idxs != -1).to(tl.int32)
-    has_one_active = tl.sum(is_src_active, axis=1) == 1
+    num_src_active = tl.sum(is_src_active, axis=1)
 
-    need_finalize_scatter = mask_m & (~has_one_active)
+    need_finalize_scatter = mask_m & (num_src_active != 1)
     finalize_scatter_count = tl.sum(need_finalize_scatter.to(tl.int32))
     if finalize_scatter_count == 0:
         return

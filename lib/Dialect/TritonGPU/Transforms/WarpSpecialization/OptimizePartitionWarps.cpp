@@ -90,9 +90,8 @@ static LogicalResult relayoutWarps(ModuleAxisInfoAnalysis &axisInfo,
 
   // Start by removing all tensor encodings.
   mlir::AttrTypeReplacer replacer;
-  replacer.addReplacement([](RankedTensorType ty) {
-    return RankedTensorType::get(ty.getShape(), ty.getElementType());
-  });
+  replacer.addReplacement(
+      [](RankedTensorType ty) { return ty.cloneWithEncoding({}); });
   // But don't remove them from the tensors inside descriptors.
   replacer.addReplacement([](TensorDescType ty) -> std::pair<Type, WalkResult> {
     return {ty, WalkResult::skip()};
@@ -257,7 +256,7 @@ static LogicalResult optimizePartitionNumWarps(ModuleAxisInfoAnalysis &axisInfo,
        llvm::zip(wsOp.getPartitionRegions(), partitionNumWarps,
                  wsOp.getPartitionNumWarps(), maxTensorRegs, estRegUsage)) {
     // "Guess" the register usage for each partition.
-    estRegs = tensorRegs ? 72 : 24;
+    estRegs = tensorRegs ? 88 : 24;
 
     // Layouts need to be reassigned if the number of warps changed and there
     // are tensor computations.

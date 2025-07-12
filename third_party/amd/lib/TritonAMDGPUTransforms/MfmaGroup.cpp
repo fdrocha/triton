@@ -1,6 +1,7 @@
 #include "TritonAMDGPUTransforms/MfmaGroup.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Diagnostics.h"
 #include "llvm/ADT/DenseMap.h"
 #include <tuple>
 
@@ -23,9 +24,9 @@ using MfmaKey =
 //
 // This function adapts certain parameters so we can be flexible when trying
 // to query with "mismatches".
-MfmaKey composeMfmaKeyFor(unsigned version, unsigned mDim, unsigned nDim,
-                          Type &aElemType, Type &bElemType, bool withScale,
-                          bool useTF32) {
+MfmaKey composeMfmaKeyFor(Location loc, unsigned version, unsigned mDim,
+                          unsigned nDim, Type &aElemType, Type &bElemType,
+                          bool withScale, bool useTF32) {
   Type aET = aElemType, bET = bElemType;
   Builder b(aElemType.getContext());
   if (withScale) {
@@ -38,9 +39,14 @@ MfmaKey composeMfmaKeyFor(unsigned version, unsigned mDim, unsigned nDim,
     // In the MFMA map we use the proper TF32 type. So "fix" it here.
     assert(version == 3);
     aET = bET = b.getType<FloatTF32Type>();
-  } else if (version <= 3 && isa<Float8E5M2Type>(aET) &&
-             isa<Float8E5M2Type>(bET)) {
-    // For the OCP FP8 E5M2 type, we can emulate the support for it with FP16.
+  } else if (version <= 3 && isa<Float8E5M2Type, Float8E4M3FNType>(aET) &&
+             isa<Float8E5M2Type, Float8E4M3FNType>(bET)) {
+    emitRemark(loc, "missing native support for fp8 variant on current "
+                    "architecture; emulated with fp16 so low performance");
+    if (version == 3)
+      emitRemark(loc, "for gfx942 please use native supported fp8 variants");
+    // For the OCP FP8 E5M2/E4M3FN type, we don't have native support until
+    // CDNA4. So emulate with FP16.
     aElemType = bElemType = aET = bET = b.getF16Type();
   }
   return {version, mDim, nDim, aET.getTypeID(), bET.getTypeID()};
@@ -121,6 +127,7 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
       TRITON_MFMA_v2to4(m, n, aET, bET, symbol, k, kBase)
 
   Builder b(context);
+  auto f64T = b.getF64Type();
   auto f32T = b.getF32Type();
   auto tf32T = b.getTF32Type();
   auto f16T = b.getF16Type();
@@ -133,6 +140,13 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
   auto fp4T = b.getType<Float4E2M1FNType>();
 
   mfmaMap = {
+      // f64 inputs
+      // mfma_f64_16x16x4f64
+      TRITON_MFMA_v2to4(16, 16, f64T, f64T, mfma_f64_16x16x4f64, 4, 1),
+      // mfma_f64_4x4x4f64
+      TRITON_MFMA_v2to4(4, 4, f64T, f64T, mfma_f64_4x4x4f64, 16, 1),
+      TRITON_MFMA_v2to4(4, 16, f64T, f64T, mfma_f64_4x4x4f64, 4, 1),
+      TRITON_MFMA_v2to4(16, 4, f64T, f64T, mfma_f64_4x4x4f64, 4, 1),
       // f32 inputs
       // mfma_f32_32x32x2f32
       TRITON_MFMA_v1to4(32, 32, f32T, f32T, mfma_f32_32x32x2f32, 2, 1),
@@ -270,12 +284,12 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
 //===----------------------------------------------------------------------===//
 
 FailureOr<MfmaIntrinsic>
-MfmaIntrinsic::selectFor(int version, unsigned mDim, unsigned nDim,
-                         unsigned inputKDim, Type aElemType, Type bElemType,
-                         bool withScale, bool useTF32) {
+MfmaIntrinsic::selectFor(Location loc, int version, unsigned mDim,
+                         unsigned nDim, unsigned inputKDim, Type aElemType,
+                         Type bElemType, bool withScale, bool useTF32) {
   const MfmaMap &mfmaMap = MfmaDatabase::get(aElemType.getContext());
-  MfmaKey key = composeMfmaKeyFor(version, mDim, nDim, aElemType, bElemType,
-                                  withScale, useTF32);
+  MfmaKey key = composeMfmaKeyFor(loc, version, mDim, nDim, aElemType,
+                                  bElemType, withScale, useTF32);
 
   auto it = mfmaMap.find(key);
   if (it == mfmaMap.end())

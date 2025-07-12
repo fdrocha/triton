@@ -57,11 +57,10 @@ public:
     auto ctx = getContext();
     auto oldCTALayout = triton::gpu::getCTALayout(srcTy.getEncoding());
     auto newCTALayout = permuteCTALayout(ctx, oldCTALayout, trans.getOrder());
-    assert(succeeded(newCTALayout));
     auto newInnerCvtEnc =
         SwizzledSharedEncodingAttr::get(ctx, cvtEncoding, srcTy.getShape(),
                                         /*order=*/getOrderForMemory(srcTy),
-                                        *newCTALayout, srcTy.getElementType(),
+                                        newCTALayout, srcTy.getElementType(),
                                         /*needTrans=*/true);
     if (newInnerCvtEnc == cvtEncoding)
       return failure();
@@ -129,9 +128,8 @@ public:
     auto ctx = getContext();
     auto newCTALayout =
         permuteCTALayout(ctx, allocEncoding.getCTALayout(), {1, 0});
-    assert(succeeded(newCTALayout));
     auto newInnerEnc = NVMMASharedEncodingAttr::get(
-        getContext(), srcTy.getShape(), newInnerCvtOrder, *newCTALayout,
+        getContext(), srcTy.getShape(), newInnerCvtOrder, newCTALayout,
         srcTy.getElementType(), allocEncoding.getFp4Padded());
 
     MemDescType innerTy =
@@ -145,9 +143,10 @@ public:
   }
 };
 
-static Attribute inferSrcEncodingMemDescReshape(Attribute dstEncoding,
-                                                ArrayRef<int64_t> srcShape,
-                                                ArrayRef<int64_t> dstShape) {
+static Attribute inferSrcEncodingMemDescReshape(ArrayRef<int64_t> srcShape,
+                                                MemDescType dstType) {
+  auto dstEncoding = dstType.getEncoding();
+  auto dstShape = dstType.getShape();
   auto mmaEncoding = dyn_cast<NVMMASharedEncodingAttr>(dstEncoding);
   if (!mmaEncoding)
     return {};
@@ -205,8 +204,8 @@ public:
     auto allocEncoding = allocType.getEncoding();
 
     RankedTensorType srcTy = reshapeOp.getSrc().getType();
-    auto newAllocEncoding = inferSrcEncodingMemDescReshape(
-        allocEncoding, srcTy.getShape(), allocType.getShape());
+    auto newAllocEncoding =
+        inferSrcEncodingMemDescReshape(srcTy.getShape(), allocType);
     if (!newAllocEncoding)
       return failure();
 

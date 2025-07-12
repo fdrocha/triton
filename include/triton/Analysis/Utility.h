@@ -27,6 +27,7 @@ public:
   explicit ReduceOpHelper(triton::ReduceOp op)
       : op(op.getOperation()), axis(op.getAxis()) {
     auto firstTy = cast<RankedTensorType>(op.getOperands()[0].getType());
+    srcTy = firstTy;
     srcShape = firstTy.getShape();
     srcEncoding = firstTy.getEncoding();
     srcElementTypes = op.getElementTypes();
@@ -64,8 +65,11 @@ public:
 
   bool isReduceWithinCTA();
 
+  bool isAssociative();
+
 private:
   triton::ReduceOp op;
+  RankedTensorType srcTy;
   ArrayRef<int64_t> srcShape;
   Attribute srcEncoding;
   SmallVector<Type> srcElementTypes;
@@ -78,7 +82,7 @@ public:
     auto firstTy = cast<RankedTensorType>(op.getOperands()[0].getType());
     srcShape = firstTy.getShape();
     legacyEncoding = firstTy.getEncoding();
-    srcEncoding = triton::gpu::toLinearEncoding(legacyEncoding, srcShape);
+    srcEncoding = triton::gpu::toLinearEncoding(firstTy);
     srcElementTypes = op.getElementTypes();
     // The codegen does not support different element/thread/warp order so
     // we choose one a priori. We choose that of the blocked encoding.
@@ -164,6 +168,8 @@ public:
 
 private:
   triton::GatherOp gatherOp;
+  RankedTensorType srcTy;
+  RankedTensorType dstTy;
 };
 
 // This struct represents a decomposed layout conversion within a warp into
